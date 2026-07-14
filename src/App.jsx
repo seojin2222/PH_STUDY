@@ -181,8 +181,8 @@ export default function App() {
         display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 30, height: 30, borderRadius: 8, background: BRAND, color: "#fff",
-            display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15 }}>출</div>
-          <div style={{ fontWeight: 800, fontSize: 17, letterSpacing: -0.3 }}>학원 출결</div>
+            display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15 }}>P</div>
+          <div style={{ fontWeight: 800, fontSize: 17, letterSpacing: -0.3 }}>파로스스터디카페</div>
         </div>
         <div style={{ display: "flex", background: BG, borderRadius: 10, padding: 4, flexWrap: "wrap" }}>
           {[["kiosk", "출결"], ["admin", "대시보드"], ["manage", "원생 관리"]].map(([k, l]) => (
@@ -421,17 +421,19 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
 function Manage({ students, setToast, toast }) {
   const [name, setName] = useState("");
   const [seat, setSeat] = useState("");
+  const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
 
   const add = async () => {
     const nm = name.trim();
     const st = seat.trim().padStart(2, "0");
+    const ph = phone.trim();
     if (!nm || !seat.trim()) { setToast({ kind: "error", text: "이름과 좌석번호를 모두 입력해 주세요" }); return; }
     if (students.some((s) => s.seat === st)) { setToast({ kind: "error", text: `좌석번호 ${st} 는 이미 사용 중이에요` }); return; }
     setBusy(true);
     try {
-      await addDoc(collection(db, "students"), { seat: st, name: nm, createdAt: serverTimestamp() });
-      setName(""); setSeat("");
+      await addDoc(collection(db, "students"), { seat: st, name: nm, phone: ph, createdAt: serverTimestamp() });
+      setName(""); setSeat(""); setPhone("");
       setToast({ kind: "등원", text: `${nm} 등록 완료` });
     } catch { setToast({ kind: "error", text: "등록 실패 — 네트워크를 확인해 주세요" }); }
     setBusy(false);
@@ -454,6 +456,8 @@ function Manage({ students, setToast, toast }) {
           value={seat} onChange={(e) => setSeat(e.target.value.replace(/\D/g, "").slice(0, 2))} />
         <input style={inputStyle} placeholder="학생 이름" value={name}
           onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        <input style={{ ...inputStyle, maxWidth: 160 }} placeholder="부모님 전화번호" inputMode="tel"
+          value={phone} onChange={(e) => setPhone(e.target.value.replace(/[^0-9-]/g, ""))} onKeyDown={(e) => e.key === "Enter" && add()} />
         <button className="abtn" onClick={add} disabled={busy}
           style={{ border: "none", background: BRAND, color: "#fff", borderRadius: 10, padding: "0 20px", fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
           등록
@@ -464,8 +468,11 @@ function Manage({ students, setToast, toast }) {
         {students.length === 0 && <div style={{ padding: 24, textAlign: "center", color: MUTED, fontSize: 14 }}>아직 등록된 원생이 없어요. 위에서 추가해 주세요.</div>}
         {students.map((s) => (
           <div key={s.id} className="row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 16px", borderTop: `1px solid ${LINE}` }}>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>
-              <span style={{ display: "inline-block", minWidth: 34, color: BRAND, fontWeight: 800 }}>{s.seat}</span> {s.name}
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>
+                <span style={{ display: "inline-block", minWidth: 34, color: BRAND, fontWeight: 800 }}>{s.seat}</span> {s.name}
+              </div>
+              {s.phone && <div style={{ fontSize: 12.5, color: MUTED, marginTop: 3, marginLeft: 34 }}>{s.phone}</div>}
             </div>
             <button onClick={() => remove(s)} style={{ border: `1px solid ${LINE}`, background: SURFACE, color: "#B42318", borderRadius: 8, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>삭제</button>
           </div>
