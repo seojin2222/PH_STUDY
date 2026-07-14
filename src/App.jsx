@@ -18,10 +18,11 @@ import {
 /* ============================================================
    학원 출결 앱 · Firebase(Firestore) · 요약문서(집계 최적화) 버전
    컬렉션:
-     students        : { seat, name, createdAt }
-     records         : { seat, name, type, ts }              ← 원본(영구보관, 상세 엑셀용)
-     dailySummaries  : id=`${날짜}_${좌석}` { date, month, seat, name, stayMin, outCount, arrive, leave }
+     students        : { seat, name, phone, studentPhone, createdAt }
+     records         : { studentId, seat, name, type, ts }    ← 원본(영구보관, 상세 엑셀용)
+     dailySummaries  : id=`${날짜}_${studentId}` { date, month, studentId, seat, name, stayMin, outCount, arrive, leave }
                        ← 출결 찍힐 때 자동 갱신(추가 읽기 0). 월별 집계/대시보드는 이걸로 가볍게.
+                       ← studentId 기준이라 좌석번호가 바뀌어도 누적 집계가 끊기지 않음.
    ============================================================ */
 
 const BRAND = "#4F46E5";
@@ -77,15 +78,17 @@ function computeDay(records) {
   return { stay, outCount, outMin, arrive, leave };
 }
 
-/* 출결 이벤트 발생 시, 그 학생의 '오늘' 요약문서를 갱신 (추가 읽기 0 — 이미 로드된 today 데이터로 계산) */
-async function upsertDailySummary(seat, name, todaysForStudent) {
+/* 출결 이벤트 발생 시, 그 학생의 '오늘' 요약문서를 갱신 (추가 읽기 0 — 이미 로드된 today 데이터로 계산)
+   studentId를 문서 id로 써서, 이후 좌석번호가 바뀌어도 같은 학생의 누적 집계가 이어짐 */
+async function upsertDailySummary(studentId, seat, name, todaysForStudent) {
   const now = new Date();
   const c = computeDay(todaysForStudent);
   await setDoc(
-    doc(db, "dailySummaries", `${dayKey(now)}_${seat}`),
+    doc(db, "dailySummaries", `${dayKey(now)}_${studentId}`),
     {
       date: dayKey(now),
       month: monthKey(now),
+      studentId,
       seat,
       name,
       stayMin: Math.round(c.stay),
@@ -137,8 +140,8 @@ export default function App() {
   }, [toast]);
 
   const todayKey = dayKey(new Date());
-  const todayStateOf = (seat) => {
-    const rs = todayRecords.filter((r) => r.seat === seat && dayKey(r.ts) === todayKey).sort((a, b) => a.ts - b.ts);
+  const todayStateOf = (studentId) => {
+    const rs = todayRecords.filter((r) => r.studentId === studentId && dayKey(r.ts) === todayKey).sort((a, b) => a.ts - b.ts);
     return rs.length ? rs[rs.length - 1].type : "none";
   };
 
@@ -146,7 +149,7 @@ export default function App() {
     const seat = entry.padStart(2, "0");
     const stu = students.find((s) => s.seat === seat);
     if (!stu) { setToast({ kind: "error", text: `좌석번호 ${entry || "—"} 는 등록되지 않았어요` }); return; }
-    const cur = todayStateOf(seat);
+    const cur = todayStateOf(stu.id);
     const allowed = {
       등원: cur === "none" || cur === "하원",
       외출: cur === "등원" || cur === "외출복귀",
@@ -159,14 +162,14 @@ export default function App() {
     setEntry("");
     setToast({ kind: type, text: `${stu.name} · ${type} ${fmtTime(now)}` });
     try {
-      // 1) 원본 기록 저장 (상세 엑셀 · 영구보관)
-      await addDoc(collection(db, "records"), { seat, name: stu.name, type, ts: Timestamp.fromDate(now) });
+      // 1) 원본 기록 저장 (상세 엑셀 · 영구보관) — studentId를 같이 저장해 좌석 이동에도 이력이 이어지게 함
+      await addDoc(collection(db, "records"), { studentId: stu.id, seat, name: stu.name, type, ts: Timestamp.fromDate(now) });
       // 2) 오늘 요약문서 갱신 (이미 로드된 today 데이터 + 이번 이벤트로 계산 → 추가 읽기 없음)
       const todaysForStudent = todayRecords
-        .filter((r) => r.seat === seat && dayKey(r.ts) === todayKey)
+        .filter((r) => r.studentId === stu.id && dayKey(r.ts) === todayKey)
         .map((r) => ({ type: r.type, ts: r.ts }));
       todaysForStudent.push({ type, ts: now });
-      await upsertDailySummary(seat, stu.name, todaysForStudent);
+      await upsertDailySummary(stu.id, seat, stu.name, todaysForStudent);
     } catch (e) {
       setToast({ kind: "error", text: "저장 실패 — 네트워크를 확인해 주세요" });
     }
@@ -270,27 +273,30 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
   const todayKey = dayKey(new Date());
   const monthLabel = `${clock.getFullYear()}년 ${clock.getMonth() + 1}월`;
 
-  /* 월별 집계: dailySummaries만 읽음 (원본 대비 훨씬 가벼움) */
+  /* 월별 집계: dailySummaries만 읽음 (원본 대비 훨씬 가벼움)
+     studentId 기준으로 묶어서 좌석이 중간에 바뀌어도 누적이 이어짐.
+     (studentId 없는 옛 기록은 seat로 대신 묶어 하위호환) */
   const loadMonth = async () => {
     setLoading(true);
     const mk = monthKey(new Date());
     const snap = await getDocs(query(collection(db, "dailySummaries"), where("month", "==", mk)));
-    const bySeat = {};
+    const byStudent = {};
     snap.docs.forEach((d) => {
       const v = d.data();
-      (bySeat[v.seat] ||= { seat: v.seat, name: v.name, days: 0, totalStay: 0, totalOut: 0 });
-      bySeat[v.seat].days += 1;
-      bySeat[v.seat].totalStay += v.stayMin || 0;
-      bySeat[v.seat].totalOut += v.outCount || 0;
+      const key = v.studentId || `seat:${v.seat}`;
+      (byStudent[key] ||= { days: 0, totalStay: 0, totalOut: 0 });
+      byStudent[key].days += 1;
+      byStudent[key].totalStay += v.stayMin || 0;
+      byStudent[key].totalOut += v.outCount || 0;
     });
-    setSummaryRows(bySeat);
+    setSummaryRows(byStudent);
     setLoading(false);
   };
   useEffect(() => { loadMonth(); /* eslint-disable-next-line */ }, []);
 
   const todayRows = students.map((s) => {
-    const recs = todayRecords.filter((r) => r.seat === s.seat && dayKey(r.ts) === todayKey);
-    return { ...s, state: todayStateOf(s.seat), ...computeDay(recs) };
+    const recs = todayRecords.filter((r) => r.studentId === s.id && dayKey(r.ts) === todayKey);
+    return { ...s, state: todayStateOf(s.id), ...computeDay(recs) };
   });
   const present = todayRows.filter((r) => r.state === "등원" || r.state === "외출복귀").length;
   const out = todayRows.filter((r) => r.state === "외출").length;
@@ -299,7 +305,7 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
   const monthRows = useMemo(() => {
     if (!summaryRows) return [];
     return students.map((s) => {
-      const r = summaryRows[s.seat] || { days: 0, totalStay: 0, totalOut: 0 };
+      const r = summaryRows[s.id] || summaryRows[`seat:${s.seat}`] || { days: 0, totalStay: 0, totalOut: 0 };
       return { ...s, days: r.days, totalStay: r.totalStay, avg: r.days ? r.totalStay / r.days : 0, totalOut: r.totalOut };
     });
   }, [summaryRows, students]);
@@ -310,16 +316,19 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
     const summary = [["이름", "좌석", "출석일수", "누적 체류시간", "평균 체류", "외출 총횟수"]];
     monthRows.forEach((m) => summary.push([m.name, m.seat, m.days, fmtDur(m.totalStay), fmtDur(m.avg), m.totalOut]));
 
-    // 일별상세 시트 — 원본은 내보내기 누를 때만 읽음
+    // 일별상세 시트 — 원본은 내보내기 누를 때만 읽음 (studentId 기준 그룹핑 → 좌석 이동해도 이력 유지)
     const snap = await getDocs(query(collection(db, "records"), where("ts", ">=", Timestamp.fromDate(startOfMonth()))));
     const recs = snap.docs.map((d) => { const v = d.data(); return { ...v, ts: v.ts.toDate() }; });
     const grouped = {};
-    recs.forEach((r) => { (grouped[`${dayKey(r.ts)}__${r.seat}`] ||= []).push(r); });
+    recs.forEach((r) => { (grouped[`${dayKey(r.ts)}__${r.studentId || r.seat}`] ||= []).push(r); });
     const detail = [["날짜", "좌석", "이름", "등원", "하원", "외출횟수", "외출시간(분)", "순체류시간"]];
     Object.entries(grouped).sort().forEach(([k, rs]) => {
-      const [dk, seat] = k.split("__");
+      const [dk] = k.split("__");
       const c = computeDay(rs);
-      const name = students.find((s) => s.seat === seat)?.name || rs[0]?.name || "";
+      const last = rs[rs.length - 1];
+      const stu = students.find((s) => s.id === last.studentId);
+      const seat = stu?.seat || last.seat;
+      const name = stu?.name || last.name;
       detail.push([dk, seat, name, fmtTime(c.arrive), fmtTime(c.leave), c.outCount, Math.round(c.outMin), fmtDur(c.stay)]);
     });
 
@@ -365,7 +374,7 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
         {todayRows.map((r) => {
           const s = STATE[r.state];
           return (
-            <div key={r.seat} style={{ background: SURFACE, border: `1px solid ${LINE}`, borderRadius: 14, padding: 15 }}>
+            <div key={r.id} style={{ background: SURFACE, border: `1px solid ${LINE}`, borderRadius: 14, padding: 15 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ fontWeight: 800, fontSize: 15.5 }}>
                   <span style={{ color: MUTED, fontWeight: 700, fontSize: 13 }}>{r.seat}</span> {r.name}
@@ -400,7 +409,7 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
           <tbody>
             {loading && <tr><td colSpan={5} style={{ padding: 20, textAlign: "center", color: MUTED }}>불러오는 중…</td></tr>}
             {!loading && monthRows.map((m) => (
-              <tr key={m.seat} className="row" style={{ borderTop: `1px solid ${LINE}` }}>
+              <tr key={m.id} className="row" style={{ borderTop: `1px solid ${LINE}` }}>
                 <td style={{ padding: "12px 16px", fontWeight: 700 }}>
                   <span style={{ color: MUTED, fontWeight: 600, marginRight: 6 }}>{m.seat}</span>{m.name}
                 </td>
@@ -422,18 +431,22 @@ function Manage({ students, setToast, toast }) {
   const [name, setName] = useState("");
   const [seat, setSeat] = useState("");
   const [phone, setPhone] = useState("");
+  const [studentPhone, setStudentPhone] = useState("");
   const [busy, setBusy] = useState(false);
+  const [moveId, setMoveId] = useState(null);
+  const [moveSeat, setMoveSeat] = useState("");
 
   const add = async () => {
     const nm = name.trim();
     const st = seat.trim().padStart(2, "0");
     const ph = phone.trim();
+    const sph = studentPhone.trim();
     if (!nm || !seat.trim()) { setToast({ kind: "error", text: "이름과 좌석번호를 모두 입력해 주세요" }); return; }
     if (students.some((s) => s.seat === st)) { setToast({ kind: "error", text: `좌석번호 ${st} 는 이미 사용 중이에요` }); return; }
     setBusy(true);
     try {
-      await addDoc(collection(db, "students"), { seat: st, name: nm, phone: ph, createdAt: serverTimestamp() });
-      setName(""); setSeat(""); setPhone("");
+      await addDoc(collection(db, "students"), { seat: st, name: nm, phone: ph, studentPhone: sph, createdAt: serverTimestamp() });
+      setName(""); setSeat(""); setPhone(""); setStudentPhone("");
       setToast({ kind: "등원", text: `${nm} 등록 완료` });
     } catch { setToast({ kind: "error", text: "등록 실패 — 네트워크를 확인해 주세요" }); }
     setBusy(false);
@@ -443,19 +456,34 @@ function Manage({ students, setToast, toast }) {
     try { await deleteDoc(doc(db, "students", s.id)); setToast({ kind: "하원", text: `${s.name} 삭제됨` }); }
     catch { setToast({ kind: "error", text: "삭제 실패 — 네트워크를 확인해 주세요" }); }
   };
+  const startMove = (s) => { setMoveId(s.id); setMoveSeat(s.seat); };
+  const cancelMove = () => { setMoveId(null); setMoveSeat(""); };
+  const confirmMove = async (s) => {
+    const ns = moveSeat.trim().padStart(2, "0");
+    if (!moveSeat.trim()) { setToast({ kind: "error", text: "새 좌석번호를 입력해 주세요" }); return; }
+    if (ns === s.seat) { cancelMove(); return; }
+    if (students.some((x) => x.id !== s.id && x.seat === ns)) { setToast({ kind: "error", text: `좌석번호 ${ns} 는 이미 사용 중이에요` }); return; }
+    try {
+      await setDoc(doc(db, "students", s.id), { seat: ns }, { merge: true });
+      setToast({ kind: "등원", text: `${s.name} 좌석 ${s.seat} → ${ns} 이동 완료 (누적 기록 유지됨)` });
+      cancelMove();
+    } catch { setToast({ kind: "error", text: "좌석 이동 실패 — 네트워크를 확인해 주세요" }); }
+  };
 
   const inputStyle = { flex: 1, minWidth: 0, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 14px", fontSize: 15, outline: "none" };
 
   return (
     <div style={{ maxWidth: 560, margin: "0 auto", padding: "26px 20px 60px" }}>
       <div style={{ fontSize: 20, fontWeight: 800 }}>원생 관리</div>
-      <div style={{ fontSize: 13, color: MUTED, marginTop: 2, marginBottom: 18 }}>좌석번호는 출결 키오스크에서 학생이 입력하는 번호예요.</div>
+      <div style={{ fontSize: 13, color: MUTED, marginTop: 2, marginBottom: 18 }}>좌석번호는 출결 키오스크에서 학생이 입력하는 번호예요. 좌석은 나중에 이동해도 출결 기록이 그대로 유지돼요.</div>
 
       <div style={{ background: SURFACE, border: `1px solid ${LINE}`, borderRadius: 14, padding: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
         <input style={{ ...inputStyle, maxWidth: 100 }} placeholder="좌석번호" inputMode="numeric"
           value={seat} onChange={(e) => setSeat(e.target.value.replace(/\D/g, "").slice(0, 2))} />
         <input style={inputStyle} placeholder="학생 이름" value={name}
           onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        <input style={{ ...inputStyle, maxWidth: 160 }} placeholder="학생 본인 전화번호" inputMode="tel"
+          value={studentPhone} onChange={(e) => setStudentPhone(e.target.value.replace(/[^0-9-]/g, ""))} onKeyDown={(e) => e.key === "Enter" && add()} />
         <input style={{ ...inputStyle, maxWidth: 160 }} placeholder="부모님 전화번호" inputMode="tel"
           value={phone} onChange={(e) => setPhone(e.target.value.replace(/[^0-9-]/g, ""))} onKeyDown={(e) => e.key === "Enter" && add()} />
         <button className="abtn" onClick={add} disabled={busy}
@@ -467,14 +495,36 @@ function Manage({ students, setToast, toast }) {
       <div style={{ marginTop: 16, background: SURFACE, border: `1px solid ${LINE}`, borderRadius: 14, overflow: "hidden" }}>
         {students.length === 0 && <div style={{ padding: 24, textAlign: "center", color: MUTED, fontSize: 14 }}>아직 등록된 원생이 없어요. 위에서 추가해 주세요.</div>}
         {students.map((s) => (
-          <div key={s.id} className="row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 16px", borderTop: `1px solid ${LINE}` }}>
+          <div key={s.id} className="row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 16px", borderTop: `1px solid ${LINE}`, gap: 10, flexWrap: "wrap" }}>
             <div>
               <div style={{ fontWeight: 700, fontSize: 15 }}>
                 <span style={{ display: "inline-block", minWidth: 34, color: BRAND, fontWeight: 800 }}>{s.seat}</span> {s.name}
               </div>
-              {s.phone && <div style={{ fontSize: 12.5, color: MUTED, marginTop: 3, marginLeft: 34 }}>{s.phone}</div>}
+              {(s.studentPhone || s.phone) && (
+                <div style={{ fontSize: 12.5, color: MUTED, marginTop: 3, marginLeft: 34, lineHeight: 1.6 }}>
+                  {s.studentPhone && <>학생 {s.studentPhone}</>}
+                  {s.studentPhone && s.phone && <> · </>}
+                  {s.phone && <>부모님 {s.phone}</>}
+                </div>
+              )}
             </div>
-            <button onClick={() => remove(s)} style={{ border: `1px solid ${LINE}`, background: SURFACE, color: "#B42318", borderRadius: 8, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>삭제</button>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {moveId === s.id ? (
+                <>
+                  <input style={{ width: 64, border: `1px solid ${LINE}`, borderRadius: 8, padding: "6px 8px", fontSize: 13 }}
+                    inputMode="numeric" autoFocus value={moveSeat}
+                    onChange={(e) => setMoveSeat(e.target.value.replace(/\D/g, "").slice(0, 2))}
+                    onKeyDown={(e) => e.key === "Enter" && confirmMove(s)} />
+                  <button onClick={() => confirmMove(s)} style={{ border: "none", background: BRAND, color: "#fff", borderRadius: 8, padding: "6px 10px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>확인</button>
+                  <button onClick={cancelMove} style={{ border: `1px solid ${LINE}`, background: SURFACE, color: MUTED, borderRadius: 8, padding: "6px 10px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>취소</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => startMove(s)} style={{ border: `1px solid ${LINE}`, background: SURFACE, color: BRAND, borderRadius: 8, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>좌석 이동</button>
+                  <button onClick={() => remove(s)} style={{ border: `1px solid ${LINE}`, background: SURFACE, color: "#B42318", borderRadius: 8, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>삭제</button>
+                </>
+              )}
+            </div>
           </div>
         ))}
       </div>
