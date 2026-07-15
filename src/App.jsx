@@ -153,6 +153,7 @@ export default function App() {
   const [entry, setEntry] = useState("");
   const [toast, setToast] = useState(null);
   const [clock, setClock] = useState(new Date());
+  const [settings, setSettings] = useState({ kakaoEnabled: false });
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
@@ -168,6 +169,22 @@ export default function App() {
     });
     return () => unsub();
   }, []);
+
+  /* 앱 설정(카톡 자동 발송 on/off 등) 실시간 구독 */
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "settings", "app"), (snap) => {
+      setSettings(snap.exists() ? snap.data() : { kakaoEnabled: false });
+    });
+    return () => unsub();
+  }, []);
+
+  const toggleKakao = async () => {
+    try {
+      await setDoc(doc(db, "settings", "app"), { kakaoEnabled: !settings.kakaoEnabled }, { merge: true });
+    } catch {
+      setToast({ kind: "error", text: "설정 변경 실패 — 네트워크를 확인해 주세요" });
+    }
+  };
 
   const businessKey = bizKey(clock);
 
@@ -197,7 +214,7 @@ export default function App() {
     return rs.length ? rs[rs.length - 1].type : "none";
   };
 
-  const doAction = async (type) => {
+  const doAction = async (type, extra = {}) => {
     const seat = entry.padStart(2, "0");
     const stu = students.find((s) => s.seat === seat);
     if (!stu) { setToast({ kind: "error", text: `좌석번호 ${entry || "—"} 는 등록되지 않았어요` }); return; }
@@ -212,16 +229,30 @@ export default function App() {
 
     const now = new Date();
     setEntry("");
-    setToast({ kind: type, text: `${stu.name} · ${type} ${fmtTime(now)}` });
+    let toastText = `${stu.name} · ${type} ${fmtTime(now)}`;
+    if (type === "외출") {
+      toastText += ` (${extra.reason || "기타"})`;
+      toastText += extra.expectedReturn ? ` · 복귀예정 ${fmtTime(extra.expectedReturn)}` : " · 복귀 미정";
+    }
+    setToast({ kind: type, text: toastText });
     try {
       // 1) 원본 기록 저장 (상세 엑셀 · 영구보관) — studentId를 같이 저장해 좌석 이동에도 이력이 이어지게 함
-      await addDoc(collection(db, "records"), { studentId: stu.id, seat, name: stu.name, type, ts: Timestamp.fromDate(now) });
+      const record = { studentId: stu.id, seat, name: stu.name, type, ts: Timestamp.fromDate(now) };
+      if (type === "외출") {
+        record.reason = extra.reason || "기타";
+        record.expectedReturn = extra.expectedReturn ? Timestamp.fromDate(extra.expectedReturn) : null;
+      }
+      await addDoc(collection(db, "records"), record);
       // 2) 영업일 요약문서 갱신 (이미 로드된 데이터 + 이번 이벤트로 계산 → 추가 읽기 없음)
       const todaysForStudent = todayRecords
         .filter((r) => r.studentId === stu.id && bizKey(r.ts) === businessKey)
         .map((r) => ({ type: r.type, ts: r.ts }));
       todaysForStudent.push({ type, ts: now });
       await upsertDailySummary(stu.id, seat, stu.name, todaysForStudent, businessKey);
+      // 3) 카톡 자동 발송 (설정에서 켜져 있을 때만) — 솔라피 등 알림톡 연동 후 이 자리에서 API 호출하면 됨
+      if (settings.kakaoEnabled) {
+        // TODO: 알림톡 API 연동 후 실제 발송 코드 작성 (studentId=stu.id, phone=stu.phone, type, reason, expectedReturn 활용)
+      }
     } catch (e) {
       setToast({ kind: "error", text: "저장 실패 — 네트워크를 확인해 주세요" });
     }
@@ -258,7 +289,8 @@ export default function App() {
           clearEntry={() => setEntry("")} doAction={doAction} toast={toast} />
       )}
       {tab === "admin" && (
-        <Admin clock={clock} students={students} todayRecords={todayRecords} todayStateOf={todayStateOf} />
+        <Admin clock={clock} students={students} todayRecords={todayRecords} todayStateOf={todayStateOf}
+          settings={settings} toggleKakao={toggleKakao} />
       )}
       {tab === "manage" && <Manage students={students} setToast={setToast} toast={toast} />}
     </div>
@@ -266,11 +298,44 @@ export default function App() {
 }
 
 /* =================== 키오스크 =================== */
+const OUT_REASONS = ["학원", "식사", "편의점", "기타"];
+const OUT_RETURN_OPTIONS = [
+  { label: "30분 후", minutes: 30 },
+  { label: "1시간 후", minutes: 60 },
+  { label: "2시간 후", minutes: 120 },
+  { label: "미정", minutes: null },
+];
+
 function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toast }) {
+  const [outStep, setOutStep] = useState(null); // null | "reason" | "return"
+  const [outReason, setOutReason] = useState(null);
+  const [outOther, setOutOther] = useState("");
+
   const dateStr = `${clock.getFullYear()}년 ${clock.getMonth() + 1}월 ${clock.getDate()}일 ` +
     `${["일", "월", "화", "수", "목", "금", "토"][clock.getDay()]}요일`;
   const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "다시입력", "0", "back"];
   const actions = [["등원", "#16A34A"], ["외출", "#F59E0B"], ["외출복귀", "#2563EB"], ["하원", "#64748B"]];
+
+  const cancelOuting = () => { setOutStep(null); setOutReason(null); setOutOther(""); };
+  const pickReason = (r) => {
+    if (r === "기타") { setOutReason("기타"); return; }
+    setOutReason(r);
+    setOutStep("return");
+  };
+  const confirmOther = () => {
+    const text = outOther.trim();
+    setOutReason(text ? `기타(${text})` : "기타");
+    setOutStep("return");
+  };
+  const finishOuting = (minutes) => {
+    const expectedReturn = minutes != null ? new Date(Date.now() + minutes * 60000) : null;
+    doAction("외출", { reason: outReason, expectedReturn });
+    cancelOuting();
+  };
+
+  const ghostBtn = { border: `1px solid ${LINE}`, background: SURFACE, color: INK, borderRadius: 14,
+    padding: "14px 0", fontSize: 15, fontWeight: 700, cursor: "pointer" };
+
   return (
     <div style={{ maxWidth: 460, margin: "0 auto", padding: "28px 20px 48px" }}>
       <div style={{ background: SURFACE, borderRadius: 20, border: `1px solid ${LINE}`,
@@ -282,31 +347,92 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
           </div>
         </div>
         <div style={{ padding: "22px 22px 8px", textAlign: "center" }}>
-          <div style={{ fontSize: 13, color: MUTED, fontWeight: 600 }}>좌석번호를 입력해 주세요</div>
+          <div style={{ fontSize: 13, color: MUTED, fontWeight: 600 }}>
+            {outStep ? "외출 처리 중" : "좌석번호를 입력해 주세요"}
+          </div>
           <div style={{ fontSize: 40, fontWeight: 800, letterSpacing: 6, marginTop: 6, minHeight: 48,
             color: entry ? INK : "#CBD2DE" }}>{entry ? entry.padStart(2, "0") : "––"}</div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, padding: "8px 22px 4px" }}>
-          {keys.map((k) => {
-            const isUtil = k === "다시입력" || k === "back";
-            return (
-              <button key={k} className="kbtn"
-                onClick={() => (k === "다시입력" ? clearEntry() : k === "back" ? back() : press(k))}
-                style={{ border: `1px solid ${LINE}`, background: isUtil ? "#F7F9FC" : SURFACE,
-                  borderRadius: 14, padding: "16px 0", fontSize: isUtil ? 15 : 24, fontWeight: 700,
-                  color: isUtil ? MUTED : INK, cursor: "pointer" }}>
-                {k === "back" ? "←" : k}
-              </button>
-            );
-          })}
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, padding: "14px 22px 24px" }}>
-          {actions.map(([a, c]) => (
-            <button key={a} className="abtn" onClick={() => doAction(a)}
-              style={{ border: "none", background: c, color: "#fff", borderRadius: 14, padding: "16px 0",
-                fontSize: 17, fontWeight: 800, cursor: "pointer" }}>{a}</button>
-          ))}
-        </div>
+
+        {!outStep && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, padding: "8px 22px 4px" }}>
+              {keys.map((k) => {
+                const isUtil = k === "다시입력" || k === "back";
+                return (
+                  <button key={k} className="kbtn"
+                    onClick={() => (k === "다시입력" ? clearEntry() : k === "back" ? back() : press(k))}
+                    style={{ border: `1px solid ${LINE}`, background: isUtil ? "#F7F9FC" : SURFACE,
+                      borderRadius: 14, padding: "16px 0", fontSize: isUtil ? 15 : 24, fontWeight: 700,
+                      color: isUtil ? MUTED : INK, cursor: "pointer" }}>
+                    {k === "back" ? "←" : k}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, padding: "14px 22px 24px" }}>
+              {actions.map(([a, c]) => (
+                <button key={a} className="abtn"
+                  onClick={() => (a === "외출" ? setOutStep("reason") : doAction(a))}
+                  style={{ border: "none", background: c, color: "#fff", borderRadius: 14, padding: "16px 0",
+                    fontSize: 17, fontWeight: 800, cursor: "pointer" }}>{a}</button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {outStep === "reason" && (
+          <div style={{ padding: "8px 22px 24px" }}>
+            <div style={{ fontSize: 14.5, fontWeight: 800, textAlign: "center", marginBottom: 12 }}>외출 사유를 선택해 주세요</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              {OUT_REASONS.map((r) => (
+                <button key={r} className="abtn" onClick={() => pickReason(r)}
+                  style={{ ...ghostBtn, background: outReason === r || (r === "기타" && outReason?.startsWith("기타")) ? "#FEF4E2" : SURFACE,
+                    borderColor: outReason === r || (r === "기타" && outReason?.startsWith("기타")) ? "#F59E0B" : LINE }}>
+                  {r}
+                </button>
+              ))}
+            </div>
+            {outReason && outReason.startsWith("기타") && (
+              <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+                <input value={outOther} onChange={(e) => setOutOther(e.target.value)}
+                  placeholder="사유 직접 입력 (선택)"
+                  onKeyDown={(e) => e.key === "Enter" && confirmOther()}
+                  style={{ flex: 1, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px", fontSize: 14, outline: "none" }} />
+                <button className="abtn" onClick={confirmOther}
+                  style={{ border: "none", background: "#F59E0B", color: "#fff", borderRadius: 10, padding: "0 18px", fontWeight: 800, cursor: "pointer" }}>
+                  다음
+                </button>
+              </div>
+            )}
+            <button className="abtn" onClick={cancelOuting}
+              style={{ marginTop: 14, width: "100%", border: `1px solid ${LINE}`, background: "#F7F9FC", color: MUTED,
+                borderRadius: 12, padding: "12px 0", fontWeight: 700, cursor: "pointer" }}>
+              취소
+            </button>
+          </div>
+        )}
+
+        {outStep === "return" && (
+          <div style={{ padding: "8px 22px 24px" }}>
+            <div style={{ textAlign: "center", marginBottom: 12 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 800 }}>복귀 예정 시간을 선택해 주세요</div>
+              <div style={{ fontSize: 12.5, color: MUTED, marginTop: 4 }}>사유 · {outReason}</div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              {OUT_RETURN_OPTIONS.map((opt) => (
+                <button key={opt.label} className="abtn" onClick={() => finishOuting(opt.minutes)} style={ghostBtn}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <button className="abtn" onClick={cancelOuting}
+              style={{ marginTop: 14, width: "100%", border: `1px solid ${LINE}`, background: "#F7F9FC", color: MUTED,
+                borderRadius: 12, padding: "12px 0", fontWeight: 700, cursor: "pointer" }}>
+              취소
+            </button>
+          </div>
+        )}
       </div>
       <p style={{ textAlign: "center", color: MUTED, fontSize: 12.5, marginTop: 16, lineHeight: 1.6 }}>
         {students.length === 0
@@ -319,7 +445,7 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
 }
 
 /* =================== 대시보드 =================== */
-function Admin({ clock, students, todayRecords, todayStateOf }) {
+function Admin({ clock, students, todayRecords, todayStateOf, settings, toggleKakao }) {
   const [summaryRows, setSummaryRows] = useState(null); // dailySummaries 집계
   const [loading, setLoading] = useState(false);
   const businessKey = bizKey(clock);
@@ -348,7 +474,11 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
 
   const todayRows = students.map((s) => {
     const recs = todayRecords.filter((r) => r.studentId === s.id && bizKey(r.ts) === businessKey);
-    return { ...s, state: todayStateOf(s.id), ...computeDay(recs) };
+    const state = todayStateOf(s.id);
+    const lastOut = state === "외출"
+      ? recs.filter((r) => r.type === "외출").sort((a, b) => a.ts - b.ts).slice(-1)[0]
+      : null;
+    return { ...s, state, outInfo: lastOut, ...computeDay(recs) };
   });
   const present = todayRows.filter((r) => r.state === "등원" || r.state === "외출복귀").length;
   const out = todayRows.filter((r) => r.state === "외출").length;
@@ -415,6 +545,24 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
         </button>
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        background: SURFACE, border: `1px solid ${LINE}`, borderRadius: 14, padding: "14px 18px", marginTop: 16 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>카톡 자동 발송</div>
+          <div style={{ fontSize: 12, color: MUTED, marginTop: 2 }}>
+            {settings?.kakaoEnabled ? "켜짐 · 등원·외출·하원 시 부모님께 카톡이 발송돼요" : "꺼짐 · 발송 연동 준비 전에는 꺼두세요"}
+          </div>
+        </div>
+        <button className="abtn" onClick={toggleKakao}
+          aria-pressed={!!settings?.kakaoEnabled}
+          style={{ border: "none", cursor: "pointer", width: 52, height: 30, borderRadius: 999, padding: 3,
+            background: settings?.kakaoEnabled ? "#16A34A" : "#D8DEE7", display: "flex",
+            justifyContent: settings?.kakaoEnabled ? "flex-end" : "flex-start" }}>
+          <span style={{ width: 24, height: 24, borderRadius: "50%", background: "#fff", display: "block",
+            boxShadow: "0 1px 3px rgba(0,0,0,.25)" }} />
+        </button>
+      </div>
+
       <div style={{ display: "flex", gap: 12, marginTop: 18, flexWrap: "wrap" }}>
         <Stat label="등원중" value={`${present}명`} color="#16A34A" />
         <Stat label="외출중" value={`${out}명`} color="#F59E0B" />
@@ -436,6 +584,9 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
               <div style={{ fontSize: 12.5, color: MUTED, marginTop: 10, lineHeight: 1.7 }}>
                 등원 {fmtTime(r.arrive)}{r.outCount > 0 ? ` · 외출 ${r.outCount}회` : ""}<br />
                 오늘 체류 <b style={{ color: INK }}>{fmtDur(r.stay)}</b>
+                {r.state === "외출" && r.outInfo && (
+                  <><br />외출 사유 {r.outInfo.reason || "기타"} · 복귀예정 {r.outInfo.expectedReturn ? fmtTime(r.outInfo.expectedReturn.toDate ? r.outInfo.expectedReturn.toDate() : r.outInfo.expectedReturn) : "미정"}</>
+                )}
               </div>
             </div>
           );

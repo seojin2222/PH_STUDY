@@ -12,12 +12,24 @@ service cloud.firestore {
     match /records/{docId} {
       allow read, write: if true;
     }
+    match /dailySummaries/{docId} {
+      allow read, write: if true;
+    }
+    match /settings/{docId} {
+      allow read, write: if true;
+    }
 
     // === 실제 운영 시 권장 (로그인 붙인 후) ===
     // match /students/{docId} {
     //   allow read, write: if request.auth != null;
     // }
     // match /records/{docId} {
+    //   allow read, write: if request.auth != null;
+    // }
+    // match /dailySummaries/{docId} {
+    //   allow read, write: if request.auth != null;
+    // }
+    // match /settings/{docId} {
     //   allow read, write: if request.auth != null;
     // }
   }
