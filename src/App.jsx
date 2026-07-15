@@ -20,9 +20,11 @@ import {
    컬렉션:
      students        : { seat, name, phone, studentPhone, createdAt }
      records         : { studentId, seat, name, type, ts }    ← 원본(영구보관, 상세 엑셀용)
-     dailySummaries  : id=`${날짜}_${studentId}` { date, month, studentId, seat, name, stayMin, outCount, arrive, leave }
+     dailySummaries  : id=`${영업일}_${studentId}` { date, month, studentId, seat, name, stayMin, outCount, arrive, leave }
                        ← 출결 찍힐 때 자동 갱신(추가 읽기 0). 월별 집계/대시보드는 이걸로 가볍게.
                        ← studentId 기준이라 좌석번호가 바뀌어도 누적 집계가 끊기지 않음.
+   영업일(비즈니스 데이)은 자정이 아니라 새벽 1시에 넘어감 — 자정을 넘겨도 새벽 1시 전까지는
+   어제 영업일 그대로 이어지고, 새벽 1시가 지나면 아직 하원 안 찍은 학생은 자동으로 하원 처리됨.
    ============================================================ */
 
 const BRAND = "#4F46E5";
@@ -49,9 +51,18 @@ const fmtDur = (min) => {
   return h > 0 ? `${h}시간 ${m}분` : `${m}분`;
 };
 const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const monthKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
 const startOfMonth = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); };
+
+/* 영업일 기준 새벽 1시 — 자정이 지나도 새벽 1시 전까지는 "어제 영업일"로 취급해
+   등원 상태·누적 기록이 끊기지 않게 함. 새벽 1시가 지나면 새 영업일로 넘어감. */
+const BIZ_CUTOFF_HOUR = 1;
+const startOfBizDay = (now = new Date()) => {
+  const d = new Date(now);
+  d.setHours(BIZ_CUTOFF_HOUR, 0, 0, 0);
+  if (d > now) d.setDate(d.getDate() - 1);
+  return d;
+};
+const bizKey = (d) => dayKey(startOfBizDay(d));
 
 /* 하루치 기록 → 순 체류시간(분), 외출횟수/시간, 등·하원 시각 */
 function computeDay(records) {
@@ -78,16 +89,16 @@ function computeDay(records) {
   return { stay, outCount, outMin, arrive, leave };
 }
 
-/* 출결 이벤트 발생 시, 그 학생의 '오늘' 요약문서를 갱신 (추가 읽기 0 — 이미 로드된 today 데이터로 계산)
-   studentId를 문서 id로 써서, 이후 좌석번호가 바뀌어도 같은 학생의 누적 집계가 이어짐 */
-async function upsertDailySummary(studentId, seat, name, todaysForStudent) {
-  const now = new Date();
-  const c = computeDay(todaysForStudent);
+/* 출결 이벤트 발생 시, 그 학생의 '영업일' 요약문서를 갱신 (추가 읽기 0 — 이미 로드된 데이터로 계산)
+   studentId를 문서 id로 써서, 이후 좌석번호가 바뀌어도 같은 학생의 누적 집계가 이어짐.
+   dayStr은 영업일 기준(bizKey) 날짜 — 자정을 넘겨도 새벽 1시 전이면 어제 영업일로 계속 누적됨 */
+async function upsertDailySummary(studentId, seat, name, recordsForDay, dayStr) {
+  const c = computeDay(recordsForDay);
   await setDoc(
-    doc(db, "dailySummaries", `${dayKey(now)}_${studentId}`),
+    doc(db, "dailySummaries", `${dayStr}_${studentId}`),
     {
-      date: dayKey(now),
-      month: monthKey(now),
+      date: dayStr,
+      month: dayStr.slice(0, 7),
       studentId,
       seat,
       name,
@@ -99,6 +110,40 @@ async function upsertDailySummary(studentId, seat, name, todaysForStudent) {
     },
     { merge: true }
   );
+}
+
+/* 새벽 1시가 지났는데 아직 하원을 안 찍은 학생을, 어제 영업일 마감 시각(새벽 1시)으로 자동 하원 처리.
+   태블릿이 꺼져 있다가 다음날 켜져도, 켜지는 시점에 밀린 영업일을 찾아 자동으로 정리함(멱등적으로 재실행 가능). */
+async function autoCloseStaleSessions(students) {
+  const curStart = startOfBizDay(new Date());
+  const prevStart = new Date(curStart);
+  prevStart.setDate(prevStart.getDate() - 1);
+  const prevKey = dayKey(prevStart);
+  // 마감 시각을 정각(curStart)보다 1분 앞당겨, bizKey로 다시 분류될 때도 확실히 어제 영업일에 속하게 함
+  const closeTs = new Date(curStart.getTime() - 60000);
+
+  const snap = await getDocs(
+    query(
+      collection(db, "records"),
+      where("ts", ">=", Timestamp.fromDate(prevStart)),
+      where("ts", "<", Timestamp.fromDate(curStart))
+    )
+  );
+  const recs = snap.docs.map((d) => { const v = d.data(); return { ...v, ts: v.ts.toDate() }; });
+  const byStudent = {};
+  recs.forEach((r) => { if (r.studentId) (byStudent[r.studentId] ||= []).push(r); });
+
+  for (const stu of students) {
+    const rs = (byStudent[stu.id] || []).slice().sort((a, b) => a.ts - b.ts);
+    if (!rs.length) continue;
+    const lastType = rs[rs.length - 1].type;
+    if (lastType === "등원" || lastType === "외출복귀") {
+      await addDoc(collection(db, "records"), {
+        studentId: stu.id, seat: stu.seat, name: stu.name, type: "하원", ts: Timestamp.fromDate(closeTs), auto: true,
+      });
+      await upsertDailySummary(stu.id, stu.seat, stu.name, [...rs, { type: "하원", ts: closeTs }], prevKey);
+    }
+  }
 }
 
 export default function App() {
@@ -124,14 +169,22 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  /* 오늘 출결 실시간 구독 (오늘 것만 — 읽기 최소화) */
+  const businessKey = bizKey(clock);
+
+  /* 영업일(새벽 1시 기준) 출결 실시간 구독 — 자정을 넘겨도 새벽 1시 전까지는 어제 영업일 데이터를 계속 봄 */
   useEffect(() => {
-    const q = query(collection(db, "records"), where("ts", ">=", Timestamp.fromDate(startOfToday())));
+    const q = query(collection(db, "records"), where("ts", ">=", Timestamp.fromDate(startOfBizDay(new Date()))));
     const unsub = onSnapshot(q, (snap) => {
       setTodayRecords(snap.docs.map((d) => { const v = d.data(); return { id: d.id, ...v, ts: v.ts.toDate() }; }));
     });
     return () => unsub();
-  }, []);
+  }, [businessKey]);
+
+  /* 새벽 1시가 지나면(=영업일이 바뀌면), 그리고 앱을 처음 열 때, 전날 밀린 미하원 학생을 자동 하원 처리 */
+  useEffect(() => {
+    if (students.length) autoCloseStaleSessions(students);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [businessKey, students.length]);
 
   useEffect(() => {
     if (!toast) return;
@@ -139,9 +192,8 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const todayKey = dayKey(new Date());
   const todayStateOf = (studentId) => {
-    const rs = todayRecords.filter((r) => r.studentId === studentId && dayKey(r.ts) === todayKey).sort((a, b) => a.ts - b.ts);
+    const rs = todayRecords.filter((r) => r.studentId === studentId && bizKey(r.ts) === businessKey).sort((a, b) => a.ts - b.ts);
     return rs.length ? rs[rs.length - 1].type : "none";
   };
 
@@ -164,12 +216,12 @@ export default function App() {
     try {
       // 1) 원본 기록 저장 (상세 엑셀 · 영구보관) — studentId를 같이 저장해 좌석 이동에도 이력이 이어지게 함
       await addDoc(collection(db, "records"), { studentId: stu.id, seat, name: stu.name, type, ts: Timestamp.fromDate(now) });
-      // 2) 오늘 요약문서 갱신 (이미 로드된 today 데이터 + 이번 이벤트로 계산 → 추가 읽기 없음)
+      // 2) 영업일 요약문서 갱신 (이미 로드된 데이터 + 이번 이벤트로 계산 → 추가 읽기 없음)
       const todaysForStudent = todayRecords
-        .filter((r) => r.studentId === stu.id && dayKey(r.ts) === todayKey)
+        .filter((r) => r.studentId === stu.id && bizKey(r.ts) === businessKey)
         .map((r) => ({ type: r.type, ts: r.ts }));
       todaysForStudent.push({ type, ts: now });
-      await upsertDailySummary(stu.id, seat, stu.name, todaysForStudent);
+      await upsertDailySummary(stu.id, seat, stu.name, todaysForStudent, businessKey);
     } catch (e) {
       setToast({ kind: "error", text: "저장 실패 — 네트워크를 확인해 주세요" });
     }
@@ -270,7 +322,7 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
 function Admin({ clock, students, todayRecords, todayStateOf }) {
   const [summaryRows, setSummaryRows] = useState(null); // dailySummaries 집계
   const [loading, setLoading] = useState(false);
-  const todayKey = dayKey(new Date());
+  const businessKey = bizKey(clock);
   const monthLabel = `${clock.getFullYear()}년 ${clock.getMonth() + 1}월`;
 
   /* 월별 집계: dailySummaries만 읽음 (원본 대비 훨씬 가벼움)
@@ -278,7 +330,7 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
      (studentId 없는 옛 기록은 seat로 대신 묶어 하위호환) */
   const loadMonth = async () => {
     setLoading(true);
-    const mk = monthKey(new Date());
+    const mk = businessKey.slice(0, 7);
     const snap = await getDocs(query(collection(db, "dailySummaries"), where("month", "==", mk)));
     const byStudent = {};
     snap.docs.forEach((d) => {
@@ -295,7 +347,7 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
   useEffect(() => { loadMonth(); /* eslint-disable-next-line */ }, []);
 
   const todayRows = students.map((s) => {
-    const recs = todayRecords.filter((r) => r.studentId === s.id && dayKey(r.ts) === todayKey);
+    const recs = todayRecords.filter((r) => r.studentId === s.id && bizKey(r.ts) === businessKey);
     return { ...s, state: todayStateOf(s.id), ...computeDay(recs) };
   });
   const present = todayRows.filter((r) => r.state === "등원" || r.state === "외출복귀").length;
@@ -320,7 +372,7 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
     const snap = await getDocs(query(collection(db, "records"), where("ts", ">=", Timestamp.fromDate(startOfMonth()))));
     const recs = snap.docs.map((d) => { const v = d.data(); return { ...v, ts: v.ts.toDate() }; });
     const grouped = {};
-    recs.forEach((r) => { (grouped[`${dayKey(r.ts)}__${r.studentId || r.seat}`] ||= []).push(r); });
+    recs.forEach((r) => { (grouped[`${bizKey(r.ts)}__${r.studentId || r.seat}`] ||= []).push(r); });
     const detail = [["날짜", "좌석", "이름", "등원", "하원", "외출횟수", "외출시간(분)", "순체류시간"]];
     Object.entries(grouped).sort().forEach(([k, rs]) => {
       const [dk] = k.split("__");
@@ -339,7 +391,7 @@ function Admin({ clock, students, todayRecords, todayStateOf }) {
     ws1["!cols"] = [{ wch: 12 }, { wch: 6 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 9 }, { wch: 12 }, { wch: 12 }];
     XLSX.utils.book_append_sheet(wb, ws2, "월별집계");
     XLSX.utils.book_append_sheet(wb, ws1, "일별상세");
-    XLSX.writeFile(wb, `출결집계_${monthKey(new Date())}.xlsx`);
+    XLSX.writeFile(wb, `출결집계_${businessKey.slice(0, 7)}.xlsx`);
   };
 
   const Stat = ({ label, value, color }) => (
