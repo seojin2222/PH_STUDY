@@ -310,13 +310,21 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
   const [outStep, setOutStep] = useState(null); // null | "reason" | "return"
   const [outReason, setOutReason] = useState(null);
   const [outOther, setOutOther] = useState("");
+  const [outExpectedReturn, setOutExpectedReturn] = useState(null);
+  const [confirmType, setConfirmType] = useState(null); // 오작동 방지 — 실제 처리 전 마지막 확인 단계
 
   const dateStr = `${clock.getFullYear()}년 ${clock.getMonth() + 1}월 ${clock.getDate()}일 ` +
     `${["일", "월", "화", "수", "목", "금", "토"][clock.getDay()]}요일`;
   const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "다시입력", "0", "back"];
   const actions = [["등원", "#16A34A"], ["외출", "#F59E0B"], ["외출복귀", "#2563EB"], ["하원", "#64748B"]];
 
-  const cancelOuting = () => { setOutStep(null); setOutReason(null); setOutOther(""); };
+  const stu = students.find((s) => s.seat === entry.padStart(2, "0"));
+
+  const resetAll = () => {
+    setOutStep(null); setOutReason(null); setOutOther("");
+    setOutExpectedReturn(null); setConfirmType(null);
+  };
+  const cancelOuting = () => { setOutStep(null); setOutReason(null); setOutOther(""); setOutExpectedReturn(null); };
   const pickReason = (r) => {
     if (r === "기타") { setOutReason("기타"); return; }
     setOutReason(r);
@@ -328,10 +336,25 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
     setOutStep("return");
   };
   const finishOuting = (minutes) => {
-    const expectedReturn = minutes != null ? new Date(Date.now() + minutes * 60000) : null;
-    doAction("외출", { reason: outReason, expectedReturn });
-    cancelOuting();
+    setOutExpectedReturn(minutes != null ? new Date(Date.now() + minutes * 60000) : null);
+    setConfirmType("외출");
   };
+  const runConfirmed = () => {
+    const extra = confirmType === "외출" ? { reason: outReason, expectedReturn: outExpectedReturn } : {};
+    doAction(confirmType, extra);
+    resetAll();
+  };
+
+  const previewText = (() => {
+    if (!confirmType || !stu) return "";
+    const t = fmtTime(clock);
+    if (confirmType === "등원") return `${stu.name} 학생이 ${t}에 등원하였습니다.`;
+    if (confirmType === "하원") return `${stu.name} 학생이 ${t}에 하원하였습니다.`;
+    if (confirmType === "외출복귀") return `${stu.name} 학생이 ${t}에 외출에서 복귀(재등원)하였습니다.`;
+    if (confirmType === "외출")
+      return `${stu.name} 학생이 ${t}에 외출하였습니다. (사유: ${outReason} · 복귀예정: ${outExpectedReturn ? fmtTime(outExpectedReturn) : "미정"})`;
+    return "";
+  })();
 
   const ghostBtn = { border: `1px solid ${LINE}`, background: SURFACE, color: INK, borderRadius: 14,
     padding: "14px 0", fontSize: 15, fontWeight: 700, cursor: "pointer" };
@@ -348,13 +371,13 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
         </div>
         <div style={{ padding: "22px 22px 8px", textAlign: "center" }}>
           <div style={{ fontSize: 13, color: MUTED, fontWeight: 600 }}>
-            {outStep ? "외출 처리 중" : "좌석번호를 입력해 주세요"}
+            {confirmType ? "내용을 확인해 주세요" : outStep ? "외출 처리 중" : "좌석번호를 입력해 주세요"}
           </div>
           <div style={{ fontSize: 40, fontWeight: 800, letterSpacing: 6, marginTop: 6, minHeight: 48,
             color: entry ? INK : "#CBD2DE" }}>{entry ? entry.padStart(2, "0") : "––"}</div>
         </div>
 
-        {!outStep && (
+        {!outStep && !confirmType && (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, padding: "8px 22px 4px" }}>
               {keys.map((k) => {
@@ -373,7 +396,7 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, padding: "14px 22px 24px" }}>
               {actions.map(([a, c]) => (
                 <button key={a} className="abtn"
-                  onClick={() => (a === "외출" ? setOutStep("reason") : doAction(a))}
+                  onClick={() => (a === "외출" ? setOutStep("reason") : setConfirmType(a))}
                   style={{ border: "none", background: c, color: "#fff", borderRadius: 14, padding: "16px 0",
                     fontSize: 17, fontWeight: 800, cursor: "pointer" }}>{a}</button>
               ))}
@@ -381,7 +404,34 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
           </>
         )}
 
-        {outStep === "reason" && (
+        {confirmType && (
+          <div style={{ padding: "8px 22px 24px" }}>
+            <div style={{ fontSize: 14.5, fontWeight: 800, textAlign: "center", marginBottom: 4 }}>
+              {stu?.name} 학생 · {confirmType}
+            </div>
+            <div style={{ fontSize: 12.5, color: MUTED, textAlign: "center", marginBottom: 14 }}>
+              아래 내용으로 처리할까요?
+            </div>
+            <div style={{ background: "#F7F9FC", border: `1px solid ${LINE}`, borderRadius: 12,
+              padding: "14px 16px", fontSize: 13.5, color: INK, lineHeight: 1.6 }}>
+              {previewText}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
+              <button className="abtn" onClick={resetAll}
+                style={{ border: `1px solid ${LINE}`, background: "#F7F9FC", color: MUTED, borderRadius: 12,
+                  padding: "13px 0", fontWeight: 700, cursor: "pointer" }}>
+                아니오
+              </button>
+              <button className="abtn" onClick={runConfirmed}
+                style={{ border: "none", background: BRAND, color: "#fff", borderRadius: 12,
+                  padding: "13px 0", fontWeight: 800, cursor: "pointer" }}>
+                예, 맞아요
+              </button>
+            </div>
+          </div>
+        )}
+
+        {outStep === "reason" && !confirmType && (
           <div style={{ padding: "8px 22px 24px" }}>
             <div style={{ fontSize: 14.5, fontWeight: 800, textAlign: "center", marginBottom: 12 }}>외출 사유를 선택해 주세요</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -413,7 +463,7 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
           </div>
         )}
 
-        {outStep === "return" && (
+        {outStep === "return" && !confirmType && (
           <div style={{ padding: "8px 22px 24px" }}>
             <div style={{ textAlign: "center", marginBottom: 12 }}>
               <div style={{ fontSize: 14.5, fontWeight: 800 }}>복귀 예정 시간을 선택해 주세요</div>
