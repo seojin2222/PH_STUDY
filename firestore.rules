@@ -2,35 +2,18 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ⚠️ MVP용 임시 규칙입니다.
-    // 아래는 "누구나 읽고 쓸 수 있음" — 데모/개발 단계에서만 사용하세요.
-    // 실제 배포 시에는 Firebase Auth 로그인을 붙이고 request.auth != null 로 잠가야 합니다.
-
+    // 로그인(Firebase Auth)한 직원만 읽고 쓸 수 있음.
     match /students/{docId} {
-      allow read, write: if true;
+      allow read, write: if request.auth != null;
     }
     match /records/{docId} {
-      allow read, write: if true;
+      allow read, write: if request.auth != null;
     }
     match /dailySummaries/{docId} {
-      allow read, write: if true;
+      allow read, write: if request.auth != null;
     }
     match /settings/{docId} {
-      allow read, write: if true;
+      allow read, write: if request.auth != null;
     }
-
-    // === 실제 운영 시 권장 (로그인 붙인 후) ===
-    // match /students/{docId} {
-    //   allow read, write: if request.auth != null;
-    // }
-    // match /records/{docId} {
-    //   allow read, write: if request.auth != null;
-    // }
-    // match /dailySummaries/{docId} {
-    //   allow read, write: if request.auth != null;
-    // }
-    // match /settings/{docId} {
-    //   allow read, write: if request.auth != null;
-    // }
   }
 }

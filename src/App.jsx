@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import * as XLSX from "xlsx";
-import { db } from "./firebase";
+import { db, auth } from "./firebase";
 import {
   collection,
   addDoc,
@@ -14,6 +14,12 @@ import {
   Timestamp,
   serverTimestamp,
 } from "firebase/firestore";
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+} from "firebase/auth";
 
 /* ============================================================
    학원 출결 앱 · Firebase(Firestore) · 요약문서(집계 최적화) 버전
@@ -147,6 +153,88 @@ async function autoCloseStaleSessions(students) {
 }
 
 export default function App() {
+  const [user, setUser] = useState(undefined); // undefined=확인중, null=미로그인, 객체=로그인됨
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setUser(u));
+    return () => unsub();
+  }, []);
+
+  if (user === undefined) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: BG,
+        fontFamily: "'Pretendard', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" }}>
+        <div style={{ color: MUTED, fontSize: 14 }}>불러오는 중…</div>
+      </div>
+    );
+  }
+  if (!user) return <Login />;
+  return <AttendanceApp />;
+}
+
+function Login() {
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const errText = (code) => ({
+    "auth/invalid-email": "이메일 형식이 올바르지 않아요",
+    "auth/user-not-found": "등록되지 않은 계정이에요",
+    "auth/wrong-password": "비밀번호가 틀렸어요",
+    "auth/invalid-credential": "이메일 또는 비밀번호가 올바르지 않아요",
+    "auth/email-already-in-use": "이미 가입된 이메일이에요",
+    "auth/weak-password": "비밀번호는 6자 이상이어야 해요",
+  }[code] || "처리 중 오류가 발생했어요");
+
+  const submit = async () => {
+    if (!email.trim() || !password) { setError("이메일과 비밀번호를 입력해 주세요"); return; }
+    setBusy(true); setError("");
+    try {
+      if (mode === "login") await signInWithEmailAndPassword(auth, email.trim(), password);
+      else await createUserWithEmailAndPassword(auth, email.trim(), password);
+    } catch (e) {
+      setError(errText(e.code));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: BG, padding: 20,
+      fontFamily: "'Pretendard', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" }}>
+      <div style={{ width: "100%", maxWidth: 360, background: SURFACE, border: `1px solid ${LINE}`, borderRadius: 20,
+        boxShadow: "0 10px 30px rgba(20,34,51,.06)", padding: "32px 26px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "center", marginBottom: 22 }}>
+          <img src="/pharos-icon.png" alt="파로스스터디카페 로고" style={{ width: 30, height: 30, objectFit: "contain" }} />
+          <div style={{ fontWeight: 800, fontSize: 17 }}>파로스스터디카페</div>
+        </div>
+        <div style={{ fontSize: 13, color: MUTED, textAlign: "center", marginBottom: 20 }}>
+          {mode === "login" ? "직원 계정으로 로그인해 주세요" : "새 직원 계정을 만들어 주세요"}
+        </div>
+        <input type="email" placeholder="이메일" value={email} onChange={(e) => setEmail(e.target.value)}
+          style={{ width: "100%", border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 14px", fontSize: 15, outline: "none", marginBottom: 10 }} />
+        <input type="password" placeholder="비밀번호" value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          style={{ width: "100%", border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 14px", fontSize: 15, outline: "none" }} />
+        {error && <div style={{ color: "#B42318", fontSize: 12.5, marginTop: 10 }}>{error}</div>}
+        <button className="abtn" onClick={submit} disabled={busy}
+          style={{ width: "100%", marginTop: 16, border: "none", background: BRAND, color: "#fff", borderRadius: 10,
+            padding: "13px 0", fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
+          {busy ? "처리 중…" : mode === "login" ? "로그인" : "계정 만들기"}
+        </button>
+        <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); }}
+          style={{ width: "100%", marginTop: 12, border: "none", background: "transparent", color: MUTED,
+            fontSize: 12.5, cursor: "pointer", textDecoration: "underline" }}>
+          {mode === "login" ? "처음이신가요? 계정 만들기" : "이미 계정이 있으신가요? 로그인"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AttendanceApp() {
   const [tab, setTab] = useState("kiosk");
   const [students, setStudents] = useState([]);
   const [todayRecords, setTodayRecords] = useState([]);
@@ -277,8 +365,7 @@ export default function App() {
       <div style={{ background: SURFACE, borderBottom: `1px solid ${LINE}`, padding: "14px 20px",
         display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 30, height: 30, borderRadius: 8, background: BRAND, color: "#fff",
-            display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15 }}>P</div>
+          <img src="/pharos-icon.png" alt="파로스스터디카페 로고" style={{ width: 30, height: 30, objectFit: "contain" }} />
           <div style={{ fontWeight: 800, fontSize: 17, letterSpacing: -0.3 }}>파로스스터디카페</div>
         </div>
         <div style={{ display: "flex", background: BG, borderRadius: 10, padding: 4, flexWrap: "wrap" }}>
@@ -290,6 +377,11 @@ export default function App() {
               {l}
             </button>
           ))}
+          <button onClick={() => signOut(auth)}
+            style={{ border: "none", cursor: "pointer", padding: "7px 13px", borderRadius: 8, fontSize: 13.5,
+              fontWeight: 700, background: "transparent", color: MUTED }}>
+            로그아웃
+          </button>
         </div>
       </div>
 
