@@ -17,7 +17,6 @@ import {
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   signOut,
 } from "firebase/auth";
 
@@ -173,7 +172,6 @@ export default function App() {
 }
 
 function Login() {
-  const [mode, setMode] = useState("login"); // "login" | "signup"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -184,16 +182,14 @@ function Login() {
     "auth/user-not-found": "등록되지 않은 계정이에요",
     "auth/wrong-password": "비밀번호가 틀렸어요",
     "auth/invalid-credential": "이메일 또는 비밀번호가 올바르지 않아요",
-    "auth/email-already-in-use": "이미 가입된 이메일이에요",
-    "auth/weak-password": "비밀번호는 6자 이상이어야 해요",
-  }[code] || "처리 중 오류가 발생했어요");
+    "auth/too-many-requests": "시도가 너무 많아요, 잠시 후 다시 시도해 주세요",
+  }[code] || "로그인에 실패했어요");
 
   const submit = async () => {
     if (!email.trim() || !password) { setError("이메일과 비밀번호를 입력해 주세요"); return; }
     setBusy(true); setError("");
     try {
-      if (mode === "login") await signInWithEmailAndPassword(auth, email.trim(), password);
-      else await createUserWithEmailAndPassword(auth, email.trim(), password);
+      await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (e) {
       setError(errText(e.code));
     }
@@ -210,7 +206,7 @@ function Login() {
           <div style={{ fontWeight: 800, fontSize: 17 }}>파로스스터디카페</div>
         </div>
         <div style={{ fontSize: 13, color: MUTED, textAlign: "center", marginBottom: 20 }}>
-          {mode === "login" ? "직원 계정으로 로그인해 주세요" : "새 직원 계정을 만들어 주세요"}
+          직원 계정으로 로그인해 주세요
         </div>
         <input type="email" placeholder="이메일" value={email} onChange={(e) => setEmail(e.target.value)}
           style={{ width: "100%", border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 14px", fontSize: 15, outline: "none", marginBottom: 10 }} />
@@ -222,12 +218,7 @@ function Login() {
         <button className="abtn" onClick={submit} disabled={busy}
           style={{ width: "100%", marginTop: 16, border: "none", background: BRAND, color: "#fff", borderRadius: 10,
             padding: "13px 0", fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
-          {busy ? "처리 중…" : mode === "login" ? "로그인" : "계정 만들기"}
-        </button>
-        <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); }}
-          style={{ width: "100%", marginTop: 12, border: "none", background: "transparent", color: MUTED,
-            fontSize: 12.5, cursor: "pointer", textDecoration: "underline" }}>
-          {mode === "login" ? "처음이신가요? 계정 만들기" : "이미 계정이 있으신가요? 로그인"}
+          {busy ? "처리 중…" : "로그인"}
         </button>
       </div>
     </div>
