@@ -393,12 +393,16 @@ function AttendanceApp() {
 
 /* =================== 키오스크 =================== */
 const OUT_REASONS = ["학원", "식사", "편의점", "기타"];
-const OUT_RETURN_OPTIONS = [
-  { label: "30분 후", minutes: 30 },
-  { label: "1시간 후", minutes: 60 },
-  { label: "2시간 후", minutes: 120 },
-  { label: "미정", minutes: null },
-];
+const OUT_RETURN_OPTIONS = Array.from({ length: 22 }, (_, index) => {
+  const totalMinutes = 13 * 60 + index * 30;
+  const hour = Math.floor(totalMinutes / 60);
+  const minute = totalMinutes % 60;
+  return {
+    label: `${hour > 12 ? `오후 ${hour - 12}` : `오후 ${hour}`}:${pad(minute)}`,
+    hour,
+    minute,
+  };
+});
 
 function Kiosk({ clock, entry, students, settings, press, back, clearEntry, doAction, toast }) {
   const [outStep, setOutStep] = useState(null); // null | "reason" | "return"
@@ -429,8 +433,10 @@ function Kiosk({ clock, entry, students, settings, press, back, clearEntry, doAc
     setOutReason(text ? `기타(${text})` : "기타");
     setOutStep("return");
   };
-  const finishOuting = (minutes) => {
-    setOutExpectedReturn(minutes != null ? new Date(Date.now() + minutes * 60000) : null);
+  const finishOuting = (hour, minute) => {
+    const expectedReturn = new Date(clock);
+    expectedReturn.setHours(hour, minute, 0, 0);
+    setOutExpectedReturn(expectedReturn);
     setConfirmType("외출");
   };
   const runConfirmed = () => {
@@ -575,7 +581,7 @@ function Kiosk({ clock, entry, students, settings, press, back, clearEntry, doAc
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               {OUT_RETURN_OPTIONS.map((opt) => (
-                <button key={opt.label} className="abtn" onClick={() => finishOuting(opt.minutes)} style={ghostBtn}>
+                <button key={opt.label} className="abtn" onClick={() => finishOuting(opt.hour, opt.minute)} style={ghostBtn}>
                   {opt.label}
                 </button>
               ))}
