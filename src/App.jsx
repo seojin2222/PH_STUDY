@@ -249,9 +249,20 @@ export default function App() {
         .map((r) => ({ type: r.type, ts: r.ts }));
       todaysForStudent.push({ type, ts: now });
       await upsertDailySummary(stu.id, seat, stu.name, todaysForStudent, businessKey);
-      // 3) 카톡 자동 발송 (설정에서 켜져 있을 때만) — 솔라피 등 알림톡 연동 후 이 자리에서 API 호출하면 됨
-      if (settings.kakaoEnabled) {
-        // TODO: 알림톡 API 연동 후 실제 발송 코드 작성 (studentId=stu.id, phone=stu.phone, type, reason, expectedReturn 활용)
+      // 3) 카톡 자동 발송 (설정 켜짐 + 부모님 전화번호 있을 때만) — 서버(/api/notify)에서 솔라피 키로 발송, 실패해도 출결 기록엔 영향 없음
+      if (settings.kakaoEnabled && stu.phone) {
+        fetch("/api/notify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            phone: stu.phone,
+            type,
+            name: stu.name,
+            time: fmtTime(now),
+            reason: type === "외출" ? (extra.reason || "기타") : undefined,
+            expectedReturn: type === "외출" ? (extra.expectedReturn ? fmtTime(extra.expectedReturn) : "미정") : undefined,
+          }),
+        }).catch(() => {});
       }
     } catch (e) {
       setToast({ kind: "error", text: "저장 실패 — 네트워크를 확인해 주세요" });
