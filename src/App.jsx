@@ -580,11 +580,19 @@ function Kiosk({ clock, entry, students, settings, press, back, clearEntry, doAc
               <div style={{ fontSize: 12.5, color: MUTED, marginTop: 4 }}>사유 · {outReason}</div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              {OUT_RETURN_OPTIONS.map((opt) => (
-                <button key={opt.label} className="abtn" onClick={() => finishOuting(opt.hour, opt.minute)} style={ghostBtn}>
-                  {opt.label}
-                </button>
-              ))}
+              {OUT_RETURN_OPTIONS.map((opt) => {
+                const optionTime = new Date(clock);
+                optionTime.setHours(opt.hour, opt.minute, 0, 0);
+                const isPast = optionTime <= clock;
+                return (
+                  <button key={opt.label} className="abtn" disabled={isPast}
+                    onClick={() => finishOuting(opt.hour, opt.minute)}
+                    style={{ ...ghostBtn, background: isPast ? "#F2F4F8" : SURFACE,
+                      color: isPast ? "#B4BCCA" : INK, cursor: isPast ? "not-allowed" : "pointer" }}>
+                    {opt.label}
+                  </button>
+                );
+              })}
             </div>
             <button className="abtn" onClick={cancelOuting}
               style={{ marginTop: 14, width: "100%", border: `1px solid ${LINE}`, background: "#F7F9FC", color: MUTED,
