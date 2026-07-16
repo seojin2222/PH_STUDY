@@ -294,7 +294,7 @@ export default function App() {
       </div>
 
       {tab === "kiosk" && (
-        <Kiosk clock={clock} entry={entry} students={students}
+        <Kiosk clock={clock} entry={entry} students={students} settings={settings}
           press={(n) => entry.length < 2 && setEntry((e) => e + n)}
           back={() => setEntry((e) => e.slice(0, -1))}
           clearEntry={() => setEntry("")} doAction={doAction} toast={toast} />
@@ -317,7 +317,7 @@ const OUT_RETURN_OPTIONS = [
   { label: "미정", minutes: null },
 ];
 
-function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toast }) {
+function Kiosk({ clock, entry, students, settings, press, back, clearEntry, doAction, toast }) {
   const [outStep, setOutStep] = useState(null); // null | "reason" | "return"
   const [outReason, setOutReason] = useState(null);
   const [outOther, setOutOther] = useState("");
@@ -427,6 +427,16 @@ function Kiosk({ clock, entry, students, press, back, clearEntry, doAction, toas
               padding: "14px 16px", fontSize: 13.5, color: INK, lineHeight: 1.6 }}>
               {previewText}
             </div>
+            {settings?.kakaoEnabled && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 12.5,
+                color: stu?.phone ? "#16A34A" : "#B45309", fontWeight: 700 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%",
+                  background: stu?.phone ? "#16A34A" : "#F59E0B", display: "inline-block" }} />
+                {stu?.phone
+                  ? "알림톡 기능이 켜져있습니다 · 부모님께 카톡이 발송돼요"
+                  : "알림톡 기능이 켜져있지만 부모님 번호가 없어 발송되지 않아요"}
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
               <button className="abtn" onClick={resetAll}
                 style={{ border: `1px solid ${LINE}`, background: "#F7F9FC", color: MUTED, borderRadius: 12,
