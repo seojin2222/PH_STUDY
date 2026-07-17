@@ -202,8 +202,7 @@ function Login() {
       <div style={{ width: "100%", maxWidth: 360, background: SURFACE, border: `1px solid ${LINE}`, borderRadius: 20,
         boxShadow: "0 10px 30px rgba(20,34,51,.06)", padding: "32px 26px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "center", marginBottom: 22 }}>
-          <img src="/pharos-icon.png" alt="파로스스터디카페 로고" style={{ width: 30, height: 30, objectFit: "contain" }} />
-          <div style={{ fontWeight: 800, fontSize: 17 }}>파로스스터디카페</div>
+          <img src="/pharos-logo.png" alt="파로스스터디카페" style={{ height: 32, width: "auto", objectFit: "contain" }} />
         </div>
         <div style={{ fontSize: 13, color: MUTED, textAlign: "center", marginBottom: 20 }}>
           직원 계정으로 로그인해 주세요
@@ -356,8 +355,7 @@ function AttendanceApp() {
       <div style={{ background: SURFACE, borderBottom: `1px solid ${LINE}`, padding: "14px 20px",
         display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <img src="/pharos-icon.png" alt="파로스스터디카페 로고" style={{ width: 30, height: 30, objectFit: "contain" }} />
-          <div style={{ fontWeight: 800, fontSize: 17, letterSpacing: -0.3 }}>파로스스터디카페</div>
+          <img src="/pharos-logo.png" alt="파로스스터디카페" style={{ height: 26, width: "auto", objectFit: "contain" }} />
         </div>
         <div style={{ display: "flex", background: BG, borderRadius: 10, padding: 4, flexWrap: "wrap" }}>
           {[["kiosk", "출결"], ["admin", "대시보드"], ["manage", "원생 관리"]].map(([k, l]) => (
