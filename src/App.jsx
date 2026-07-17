@@ -355,7 +355,7 @@ function AttendanceApp() {
       <div style={{ background: SURFACE, borderBottom: `1px solid ${LINE}`, padding: "14px 20px",
         display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <img src="/pharos-logo.png" alt="파로스스터디카페" style={{ height: 26, width: "auto", objectFit: "contain" }} />
+          <img src="/pharos-logo.png" alt="파로스스터디카페" style={{ height: 36, width: "auto", objectFit: "contain" }} />
         </div>
         <div style={{ display: "flex", background: BG, borderRadius: 10, padding: 4, flexWrap: "wrap" }}>
           {[["kiosk", "출결"], ["admin", "대시보드"], ["manage", "원생 관리"]].map(([k, l]) => (
